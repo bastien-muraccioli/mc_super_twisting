@@ -5,6 +5,7 @@
 #pragma once
 
 #include <mc_control/GlobalPlugin.h>
+#include "LpfThreshold.h"
 
 #include <RBDyn/Coriolis.h>
 #include <RBDyn/FA.h>
@@ -31,7 +32,6 @@ struct SuperTwisting : public mc_control::GlobalPlugin
   double sign(double x);
   Eigen::VectorXd Sign(Eigen::VectorXd x);
   void computeMomemtum(mc_control::MCGlobalController & controller);
-  bool collisionDetection(mc_control::MCGlobalController & ctl);
 
   void addPlot(mc_control::MCGlobalController & ctl);
   void addLog(mc_control::MCGlobalController & ctl);
@@ -43,12 +43,29 @@ struct SuperTwisting : public mc_control::GlobalPlugin
 
 private:
 
-  std::string referenceFrame;
-  bool plugin_active = false;
-  double dt_; // Time step
+  // GUI
+  double dt_;
+  double counter_;
+
   int jointNumber;
   int jointShown = 0;
-  double counter_;
+  bool activate_plot_ = false;
+  bool plot_added_ = false;
+  bool collision_stop_activated_ = false;
+  bool obstacle_detected_ = false;
+  bool activate_verbose = false;
+
+  LpfThreshold lpf_threshold;
+  Eigen::VectorXd threshold_offset;
+  double threshold_filtering;
+  Eigen::VectorXd threshold_high;
+  Eigen::VectorXd threshold_low;
+
+  std::string referenceFrame;
+  std::string torqueSensorName;
+  std::string FTSensorName;
+  bool useFTSensor = true;
+  bool plugin_active = false;
 
   rbd::Jacobian jac;
   rbd::Coriolis * coriolis;

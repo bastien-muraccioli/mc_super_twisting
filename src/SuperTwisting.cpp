@@ -1,6 +1,7 @@
 #include "SuperTwisting.h"
 
 #include <mc_control/GlobalPluginMacros.h>
+#include <Eigen/src/Core/Matrix.h>
 
 namespace mc_plugin
 {
@@ -14,21 +15,46 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
     auto & robot = ctl.robot(ctl.robots()[0].name());
     auto & realRobot = ctl.realRobot(ctl.robots()[0].name());
     auto & rjo = robot.refJointOrder();
+    
+    dt_ = ctl.timestep();
+    counter_ = 0.0;
+    jointNumber = ctl.robot(ctl.robots()[0].name()).refJointOrder().size();
 
-    if(!robot.hasDevice<mc_rbdyn::ExternalTorqueSensor>("externalTorqueSensor"))
+    // Make sure to have obstacle detection
+    if(!ctl.controller().datastore().has("Obstacle detected"))
+    {
+        ctl.controller().datastore().make<bool>("Obstacle detected", false);
+    }
+    
+    auto plugin_config = config("super_twisting");
+
+    referenceFrame = plugin_config("reference_frame", (std::string) "FT_sensor_wrench");
+    torqueSensorName = plugin_config("torque_sensor_name", (std::string) "externalTorqueSensor");
+    FTSensorName = plugin_config("ft_sensor_name", (std::string) "EEForceSensor");
+
+    gamma2 = plugin_config("gamma2", 100.0);
+    gamma1 = plugin_config("gamma1", 21.0);
+    alpha2 = plugin_config("alpha2", 100.0);
+    alpha1 = plugin_config("alpha1", 100.0);
+
+    threshold_filtering = plugin_config("threshold_filtering", 0.05);
+    threshold_offset = plugin_config("threshold_offset");
+    if(threshold_offset.size() != jointNumber)
+    {
+        threshold_offset = Eigen::VectorXd::Constant(jointNumber, 10.0);
+        mc_rtc::log::warning("[SuperTwisting] Threshold offset not set, using default value of 10.0");
+    }
+    lpf_threshold.setValues(threshold_offset, threshold_filtering, jointNumber);
+
+    if(!robot.hasDevice<mc_rbdyn::ExternalTorqueSensor>(torqueSensorName))
     {
         mc_rtc::log::error_and_throw<std::runtime_error>(
-            "[ExternalForcesEstimator][Init] No \"ExternalTorqueSensor\" with the name \"externalTorqueSensor\" found in "
+            "[SuperTwisting] No \"ExternalTorqueSensor\" with the name \"externalTorqueSensor\" found in "
             "the robot module, please add one to the robot's RobotModule.");
     }
     extTorqueSensor = &robot.device<mc_rbdyn::ExternalTorqueSensor>("externalTorqueSensor");
 
-    referenceFrame = config("reference_frame", (std::string) "");
-
-    dt_ = ctl.timestep();
-    counter_ = 0.0;
-
-    jointNumber = ctl.robot(ctl.robots()[0].name()).refJointOrder().size();
+    ctl.setWrenches({{FTSensorName, sva::ForceVecd::Zero()}});
 
     tau_m.setZero(jointNumber);
     tau_ext_hat.setZero(jointNumber);
@@ -61,7 +87,6 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
 
     addGui(ctl);
     addLog(ctl);
-    addPlot(ctl);
 
     mc_rtc::log::info("SuperTwisting::init called with configuration:\n{}", config.dump(true, true));
 }
@@ -77,8 +102,22 @@ void SuperTwisting::before(mc_control::MCGlobalController & controller)
     auto & robot = ctl.robot(ctl.robots()[0].name());
     auto & realRobot = ctl.realRobot(ctl.robots()[0].name());
     counter_ += dt_;
+    if(activate_plot_ && !plot_added_)
+    {
+        addPlot(controller);
+        plot_added_ = true;
+    }
+
     computeMomemtum(ctl);
-    tau_ext = tau_ext_hat + jTranspose*externalForcesFT;
+    
+    if(useFTSensor)
+    {
+        tau_ext = tau_ext_hat + jTranspose*externalForcesFT;
+    }
+    else
+    {
+        tau_ext = tau_ext_hat;
+    }
     if(plugin_active)
     {
         extTorqueSensor->torques(tau_ext);
@@ -87,6 +126,20 @@ void SuperTwisting::before(mc_control::MCGlobalController & controller)
     {
         Eigen::VectorXd zero = Eigen::VectorXd::Zero(jointNumber);
         extTorqueSensor->torques(zero);
+    }
+
+    threshold_high = lpf_threshold.adaptiveThreshold(tau_ext, true);
+    threshold_low = lpf_threshold.adaptiveThreshold(tau_ext, false);
+    obstacle_detected_ = false;
+    for (int i = 0; i < jointNumber; i++)
+    {
+        if (tau_ext[i] > threshold_high[i] || tau_ext[i] < threshold_low[i])
+        {
+            obstacle_detected_ = true;
+            if(activate_verbose) mc_rtc::log::info("[SuperTwisting] Obstacle detected on joint {}", i);
+            if (collision_stop_activated_) ctl.controller().datastore().get<bool>("Obstacle detected") = obstacle_detected_;
+            break;
+        }
     }
     // mc_rtc::log::info("SuperTwisting::before");
 }
@@ -130,9 +183,10 @@ void SuperTwisting::computeMomemtum(mc_control::MCGlobalController & controller)
     auto coriolisGravityTerm = forwardDynamics.C(); //C*qdot + g
     jTranspose = jac.jacobian(realRobot.mb(), realRobot.mbc());
     jTranspose.transposeInPlace();
-    auto sva_EF_FT = realRobot.forceSensor("EEForceSensor").wrenchWithoutGravity(realRobot);
-    externalForcesFT.head(3) = R.transpose() * externalForcesFT.head(3);
-    externalForcesFT.tail(3) = R.transpose() * externalForcesFT.tail(3);
+    auto sva_EF_FT = realRobot.forceSensor(FTSensorName).wrenchWithoutGravity(realRobot);
+    Eigen::VectorXd sva_EF_FT_vec = sva_EF_FT.vector();
+    externalForcesFT.head(3) = R.transpose() * sva_EF_FT_vec.head(3);
+    externalForcesFT.tail(3) = R.transpose() * sva_EF_FT_vec.tail(3);
     gamma = tau_m + (coriolisMatrix + coriolisMatrix.transpose()) * qdot - coriolisGravityTerm + jTranspose*externalForcesFT; //gamma = tau_m -g + C^T*qdot + J^T*F_ext
     inertiaMatrix = forwardDynamics.H() - forwardDynamics.HIr();
     // x_hat_dot = Gamma + γ1*sqrt(|x - x_hat|)*Sign(x - x_hat) + d_hat
@@ -141,7 +195,7 @@ void SuperTwisting::computeMomemtum(mc_control::MCGlobalController & controller)
 
     // d_hat_dot = γ2*Sign(x - x_hat)
     // tau_ext_hat_dot = (gamma_2+gamma_3*p_error.cwiseAbs())*Sign(p_error);
-    tau_ext_hat_dot = (gamma2*p_error.cwiseAbs())*Sign(p_error) + alpha2*p_error;
+    tau_ext_hat_dot = (alpha2*Eigen::MatrixXd::Identity(jointNumber, jointNumber) + gamma2*p_error.cwiseAbs())*Sign(p_error);
     // integrate tau_ext_hat_dot to get tau_ext_hat
     tau_ext_hat += tau_ext_hat_dot*dt_;
     p = inertiaMatrix * qdot;
@@ -189,9 +243,16 @@ void SuperTwisting::addPlot(mc_control::MCGlobalController & ctl)
     gui.addPlot(
         "Torque estimation",
         mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
-        mc_rtc::gui::plot::Y("tau_ext_hat(t)", [this]() { return -tau_ext_hat[jointShown]; }, mc_rtc::gui::Color::Red),
+        mc_rtc::gui::plot::Y("high_threshold(t)", [this]() { return threshold_high[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("low_threshold(t)", [this]() { return threshold_low[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("tau_ext_hat(t)", [this]() { return -tau_ext_hat[jointShown]; }, mc_rtc::gui::Color::Blue),
         mc_rtc::gui::plot::Y("tau_m(t)", [this]() { return tau_m[jointShown]; }, mc_rtc::gui::Color::Green),
-        mc_rtc::gui::plot::Y("tau_ext(t)", [this]() { return -tau_ext[jointShown]; }, mc_rtc::gui::Color::Blue)
+        mc_rtc::gui::plot::Y("tau_ext(t)", [this]() { return -tau_ext[jointShown]; }, mc_rtc::gui::Color::Red)
+    );
+    gui.addPlot(
+        "FT Sensor",
+        mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
+        mc_rtc::gui::plot::Y("FT Sensor norm", [this]() { return externalForcesFT.norm(); }, mc_rtc::gui::Color::Red)
     );
     gui.addPlot(
         "Gamma",
@@ -213,7 +274,29 @@ void SuperTwisting::addGui(mc_control::MCGlobalController & ctl)
             [this](int joint)
             {
                 this->jointShown = joint;
-            }));
+            }),
+        mc_rtc::gui::Button("Add plot", [this]() { return activate_plot_ = true; }),
+        // Add checkbox to activate the collision stop
+        mc_rtc::gui::Checkbox("Collision stop", collision_stop_activated_),
+        mc_rtc::gui::Checkbox("Verbose", activate_verbose), 
+        // Add Threshold offset input
+        mc_rtc::gui::ArrayInput("Threshold offset", {"q_0", "q_1", "q_2", "q_3", "q_4", "q_5", "q_6"}, 
+            [this](){return this->threshold_offset;},
+            [this](const Eigen::VectorXd & offset)
+            { 
+            threshold_offset = offset;
+            lpf_threshold.setOffset(threshold_offset); 
+            }),
+        // Add Threshold filtering input
+        mc_rtc::gui::NumberInput("Threshold filtering", [this](){return this->threshold_filtering;},
+            [this](double filtering)
+            { 
+            threshold_filtering = filtering;
+            lpf_threshold.setFiltering(threshold_filtering); 
+            })                                               
+        );
+    gui.addElement({"Plugins", "SuperTwisting"},
+        mc_rtc::gui::Checkbox("Use FT Sensor", useFTSensor));
     gui.addElement({"Plugins", "SuperTwisting"},
         mc_rtc::gui::NumberInput(
             "gamma2", [this]() { return gamma2; },
@@ -265,6 +348,9 @@ void SuperTwisting::addLog(mc_control::MCGlobalController & ctl)
     ctl.controller().logger().addLogEntry("SuperTwisting_tau_ext_hat_dot", [this]() { return tau_ext_hat_dot; });
     ctl.controller().logger().addLogEntry("SuperTwisting_gamma", [this]() { return gamma; });
     ctl.controller().logger().addLogEntry("SuperTwisting_tau_ext", [this]() { return tau_ext; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_threshold_high", [this]() { return threshold_high; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_threshold_low", [this]() { return threshold_low; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_obstacle_detected", [this]() { return obstacle_detected_; });
 }
 
 } // namespace mc_plugin
