@@ -1,6 +1,7 @@
 #include "SuperTwisting.h"
 
 #include <mc_control/GlobalPluginMacros.h>
+#include <mc_rtc/gui/IntegerInput.h>
 #include <Eigen/src/Core/Matrix.h>
 
 namespace mc_plugin
@@ -19,6 +20,11 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
     dt_ = ctl.timestep();
     counter_ = 0.0;
     jointNumber = ctl.robot(ctl.robots()[0].name()).refJointOrder().size();
+
+    if(!ctl.controller().datastore().has("extTorquePlugin"))
+    {
+        ctl.controller().datastore().make_initializer<std::vector<std::string>>("extTorquePlugin", "");
+    }
 
     // Make sure to have obstacle detection
     if(!ctl.controller().datastore().has("Obstacle detected"))
@@ -58,6 +64,7 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
 
     tau_m.setZero(jointNumber);
     tau_ext_hat.setZero(jointNumber);
+    tau_ext_hat_ft_sensor.setZero(jointNumber);
     tau_ext_hat_dot.setZero(jointNumber);
     inertiaMatrix.resize(jointNumber, jointNumber);
     tau_ext.setZero(jointNumber);
@@ -85,6 +92,26 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
 
     externalForcesFT = Eigen::Vector6d::Zero();
 
+    // Super Twisting Third order
+    c = plugin_config("c", 100.0);
+    gamma3_third_order = plugin_config("gamma3_third_order", 0.0);
+    if(gamma3_third_order <= 0.0) gamma3_third_order = 1.1*c;
+    gamma2_third_order = plugin_config("gamma2_third_order", 0.0);
+    if(gamma2_third_order <= 0.0) gamma2_third_order = (9.0/2.0)*pow(c, 5.0/6.0);
+    gamma1_third_order = plugin_config("gamma1_third_order", 0.0);
+    if(gamma1_third_order <= 0.0) gamma1_third_order = 3.0*pow(c, 1.0/3.0);
+
+    p_hat_third_order.setZero(jointNumber);
+    p_error_third_order = p-p_hat_third_order;
+    tau_ext_hat_third_order.setZero(jointNumber);
+    tau_ext_hat_dot_third_order.setZero(jointNumber);
+    tau_ext_dot_hat_third_order.setZero(jointNumber);
+    tau_ext_ft_sensor.setZero(jointNumber);
+    tau_ext_hat_ft_sensor_third_order.setZero(jointNumber);
+
+    ctl.controller().datastore().make_call("SuperTwisting::isActive", [this]() { return this->plugin_active; });
+    ctl.controller().datastore().make_call("SuperTwisting::toggleActive", [this]() { this->plugin_active = !this->plugin_active; });
+
     addGui(ctl);
     addLog(ctl);
 
@@ -109,21 +136,66 @@ void SuperTwisting::before(mc_control::MCGlobalController & controller)
     }
 
     computeMomemtum(ctl);
-    
-    if(useFTSensor)
+    computeThirdOrder(ctl);
+
+    if(!third_order)
     {
-        tau_ext = tau_ext_hat + jTranspose*externalForcesFT;
+        tau_ext = tau_ext_hat;
+        
+        if(useFTSensor)
+        {
+            tau_ext = tau_ext + jTranspose*externalForcesFT;
+            tau_ext_hat_ft_sensor = tau_ext;
+        }
     }
     else
     {
-        tau_ext = tau_ext_hat;
+        tau_ext = tau_ext_hat_third_order;
+        if(useFTSensor)
+        {
+            tau_ext = tau_ext + jTranspose*externalForcesFT;
+            tau_ext_hat_ft_sensor_third_order = tau_ext;
+        }
     }
+    
+    
+
+    std::vector<std::string> & extTorquePlugin = ctl.controller().datastore().get<std::vector<std::string>>("extTorquePlugin");
+
+    if(plugin_active)
+    {
+        extTorquePlugin.push_back("SuperTwistingEstimator");
+    }
+    else
+    {
+        extTorquePlugin.erase(std::remove(extTorquePlugin.begin(), extTorquePlugin.end(), "SuperTwistingEstimator"), extTorquePlugin.end());
+    }
+
+    bool anotherPluginIsActive = false;
+    bool onePluginIsActive = false;
+    if(extTorquePlugin.size() > 0)
+    {
+        onePluginIsActive = true;
+        // for(const auto & pluginName : extTorquePlugin)
+        // {
+        //     if(pluginName != "SuperTwistingEstimator")
+        //     {
+        //         anotherPluginIsActive = true;
+        //         break;
+        //     }
+        // }
+    }
+    
     if(plugin_active)
     {
         extTorqueSensor->torques(tau_ext);
     }
-    else
+    else if(!onePluginIsActive)
     {
+        // If no other plugin is active, set the external torque to zero
+        // This is to avoid having the external torque set to zero when the plugin is not active
+        // and another plugin is using the external torque sensor
+        // mc_rtc::log::info("[SuperTwisting] No other plugin is active, setting external torque to zero");
         Eigen::VectorXd zero = Eigen::VectorXd::Zero(jointNumber);
         extTorqueSensor->torques(zero);
     }
@@ -187,7 +259,16 @@ void SuperTwisting::computeMomemtum(mc_control::MCGlobalController & controller)
     Eigen::VectorXd sva_EF_FT_vec = sva_EF_FT.vector();
     externalForcesFT.head(3) = R.transpose() * sva_EF_FT_vec.head(3);
     externalForcesFT.tail(3) = R.transpose() * sva_EF_FT_vec.tail(3);
-    gamma = tau_m + (coriolisMatrix + coriolisMatrix.transpose()) * qdot - coriolisGravityTerm + jTranspose*externalForcesFT; //gamma = tau_m -g + C^T*qdot + J^T*F_ext
+    if(useFTSensor)
+    {
+        gamma = tau_m + (coriolisMatrix + coriolisMatrix.transpose()) * qdot - coriolisGravityTerm + jTranspose*externalForcesFT; //gamma = tau_m -g + C^T*qdot + J^T*F_ext
+        tau_ext_ft_sensor = jTranspose*externalForcesFT;
+    }
+    else
+    {
+        gamma = tau_m + (coriolisMatrix + coriolisMatrix.transpose()) * qdot - coriolisGravityTerm; //gamma = tau_m -g + C^T*qdot
+        tau_ext_ft_sensor.setZero(jointNumber);
+    }
     inertiaMatrix = forwardDynamics.H() - forwardDynamics.HIr();
     // x_hat_dot = Gamma + γ1*sqrt(|x - x_hat|)*Sign(x - x_hat) + d_hat
     Eigen::VectorXd p_hat_dot = gamma + gamma1*(p_error).cwiseAbs().cwiseSqrt().cwiseProduct(Sign(p_error)) + alpha1*(p_error) + tau_ext_hat;
@@ -200,6 +281,31 @@ void SuperTwisting::computeMomemtum(mc_control::MCGlobalController & controller)
     tau_ext_hat += tau_ext_hat_dot*dt_;
     p = inertiaMatrix * qdot;
     p_error = p - p_hat;
+}
+
+void SuperTwisting::computeThirdOrder(mc_control::MCGlobalController & controller)
+{
+   // WARNING; Need to compute Momementum before running this function
+   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
+
+    if(ctl.robot().encoderVelocities().empty())
+    {
+        return;
+    }
+    Eigen::VectorXd x1 = p_error_third_order.cwiseAbs().array().pow(2.0/3.0);
+    x1 = x1.cwiseProduct(Sign(p_error_third_order));
+    Eigen::VectorXd p_hat_dot = gamma + gamma1_third_order*x1 + alpha1*(p_error_third_order) + tau_ext_hat_third_order;
+    p_hat_third_order += p_hat_dot*dt_;
+
+    Eigen::VectorXd x2 = p_error_third_order.cwiseAbs().array().pow(1.0/3.0);
+    x2 = x2.cwiseProduct(Sign(p_error_third_order));
+    tau_ext_hat_dot_third_order = gamma2_third_order*x2 + tau_ext_dot_hat_third_order;
+
+    Eigen::VectorXd tau_ext_dot_hat_dot = gamma3_third_order*Sign(p_error_third_order);
+    tau_ext_dot_hat_third_order += tau_ext_dot_hat_dot*dt_;
+    tau_ext_hat_third_order += tau_ext_hat_dot_third_order*dt_;
+
+    p_error_third_order = p - p_hat_third_order;
 }
 
 double SuperTwisting::sign(double x)
@@ -230,7 +336,9 @@ void SuperTwisting::addPlot(mc_control::MCGlobalController & ctl)
         mc_rtc::gui::plot::Y(
             "p(t)", [this]() { return p[jointShown]; }, mc_rtc::gui::Color::Red),
         mc_rtc::gui::plot::Y(
-            "p_hat(t)", [this]() { return p_hat[jointShown]; }, mc_rtc::gui::Color::Green)
+            "p_hat(t)", [this]() { return p_hat[jointShown]; }, mc_rtc::gui::Color::Green),
+        mc_rtc::gui::plot::Y(
+            "p_hat_third_order(t)", [this]() { return p_hat_third_order[jointShown]; }, mc_rtc::gui::Color::Blue)
         );
     //Momentum error
     gui.addPlot(
@@ -238,26 +346,36 @@ void SuperTwisting::addPlot(mc_control::MCGlobalController & ctl)
         mc_rtc::gui::plot::X(
             "t", [this]() { return counter_; }),
         mc_rtc::gui::plot::Y(
-            "p_error(t)", [this]() { return p_error[5]; }, mc_rtc::gui::Color::Red)
+            "p_error(t)", [this]() { return p_error[5]; }, mc_rtc::gui::Color::Red),
+        mc_rtc::gui::plot::Y(
+            "p_error_third_order(t)", [this]() { return p_error_third_order[5]; }, mc_rtc::gui::Color::Blue)
         );
     gui.addPlot(
         "Torque estimation",
         mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
-        mc_rtc::gui::plot::Y("high_threshold(t)", [this]() { return threshold_high[jointShown]; }, mc_rtc::gui::Color::Gray),
-        mc_rtc::gui::plot::Y("low_threshold(t)", [this]() { return threshold_low[jointShown]; }, mc_rtc::gui::Color::Gray),
-        mc_rtc::gui::plot::Y("tau_ext_hat(t)", [this]() { return -tau_ext_hat[jointShown]; }, mc_rtc::gui::Color::Blue),
-        mc_rtc::gui::plot::Y("tau_m(t)", [this]() { return tau_m[jointShown]; }, mc_rtc::gui::Color::Green),
-        mc_rtc::gui::plot::Y("tau_ext(t)", [this]() { return -tau_ext[jointShown]; }, mc_rtc::gui::Color::Red)
+        mc_rtc::gui::plot::Y("tau_ext_hat", [this]() { return tau_ext_hat[jointShown]; }, mc_rtc::gui::Color::Green),
+        mc_rtc::gui::plot::Y("tau_ext_hat_third_order(t)", [this]() { return tau_ext_hat_third_order[jointShown]; }, mc_rtc::gui::Color::Blue)
+       
     );
     gui.addPlot(
-        "FT Sensor",
+        "Torque estimation with FT Sensor",
         mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
-        mc_rtc::gui::plot::Y("FT Sensor norm", [this]() { return externalForcesFT.norm(); }, mc_rtc::gui::Color::Red)
+        mc_rtc::gui::plot::Y("high_threshold(t)", [this]() { return threshold_high[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("low_threshold(t)", [this]() { return threshold_low[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("tau_ext_ft_sensor(t)", [this]() { return tau_ext_ft_sensor[jointShown]; }, mc_rtc::gui::Color::Black),
+        mc_rtc::gui::plot::Y("tau_ext_hat", [this]() { return tau_ext_hat_ft_sensor[jointShown]; }, mc_rtc::gui::Color::Green),
+        mc_rtc::gui::plot::Y("tau_ext_hat_third_order(t)", [this]() { return tau_ext_hat_ft_sensor_third_order[jointShown]; }, mc_rtc::gui::Color::Blue),
+        mc_rtc::gui::plot::Y("tau_ext_used(t)", [this]() { return tau_ext[jointShown]; }, mc_rtc::gui::Color::Red)
     );
     gui.addPlot(
         "Gamma",
         mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
         mc_rtc::gui::plot::Y("gamma(t)", [this]() { return gamma[jointShown]; }, mc_rtc::gui::Color::Red)
+    );
+    gui.addPlot(
+        "tau_ext_dot_hat",
+        mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
+        mc_rtc::gui::plot::Y("tau_ext_dot_hat_third_order(t)", [this]() { return tau_ext_dot_hat_third_order[jointShown]; }, mc_rtc::gui::Color::Blue)
     );
 }
 
@@ -266,10 +384,12 @@ void SuperTwisting::addGui(mc_control::MCGlobalController & ctl)
     auto & gui = *ctl.controller().gui();
     gui.addElement({"Plugins", "SuperTwisting"},
         mc_rtc::gui::Checkbox(
-            "Is estimation feedback active", plugin_active));
+            "Is estimation feedback active", plugin_active),
+        mc_rtc::gui::Checkbox(
+            "Is third order active", third_order));
 
     gui.addElement({"Plugins", "SuperTwisting"},
-        mc_rtc::gui::NumberInput(
+        mc_rtc::gui::IntegerInput(
             "jointShown", [this]() { return jointShown; },
             [this](int joint)
             {
@@ -337,6 +457,47 @@ void SuperTwisting::addGui(mc_control::MCGlobalController & ctl)
                 tau_ext_hat_dot.setZero(jointNumber);
                 p_hat.setZero(jointNumber);
             }));
+    gui.addElement({"Plugins", "SuperTwisting"},
+        mc_rtc::gui::NumberInput(
+            "gamma3_third_order", [this]() { return gamma3_third_order; },
+            [this](double gain)
+            {
+                this->gamma3_third_order = gain;
+                tau_ext_hat.setZero(jointNumber);
+                tau_ext_hat_dot.setZero(jointNumber);
+                p_hat.setZero(jointNumber);
+            }),
+        mc_rtc::gui::NumberInput(
+            "gamma2_third_order", [this]() { return gamma2_third_order; },
+            [this](double gain)
+            {
+                this->gamma2_third_order = gain;
+                tau_ext_hat.setZero(jointNumber);
+                tau_ext_hat_dot.setZero(jointNumber);
+                p_hat.setZero(jointNumber);
+            }),
+        mc_rtc::gui::NumberInput(
+            "gamma1_third_order", [this]() { return gamma1_third_order; },
+            [this](double gain)
+            {
+                this->gamma1_third_order = gain;
+                tau_ext_hat.setZero(jointNumber);
+                tau_ext_hat_dot.setZero(jointNumber);
+                p_hat.setZero(jointNumber);
+            }),
+        mc_rtc::gui::NumberInput(
+            "c", [this]() { return c; },
+            [this](double gain)
+            {
+                this->c = gain;
+                gamma3_third_order = 1.1*c;
+                gamma2_third_order = (9.0/2.0)*pow(c, 5.0/6.0);
+                gamma1_third_order = 3.0*pow(c, 1.0/3.0);
+                tau_ext_hat.setZero(jointNumber);
+                tau_ext_hat_dot.setZero(jointNumber);
+                p_hat.setZero(jointNumber);
+            })
+        );
 }
 
 void SuperTwisting::addLog(mc_control::MCGlobalController & ctl)
@@ -351,6 +512,13 @@ void SuperTwisting::addLog(mc_control::MCGlobalController & ctl)
     ctl.controller().logger().addLogEntry("SuperTwisting_threshold_high", [this]() { return threshold_high; });
     ctl.controller().logger().addLogEntry("SuperTwisting_threshold_low", [this]() { return threshold_low; });
     ctl.controller().logger().addLogEntry("SuperTwisting_obstacle_detected", [this]() { return obstacle_detected_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_hat", [this]() { return tau_ext_hat_third_order; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_hat_dot", [this]() { return tau_ext_hat_dot_third_order; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_dot_hat", [this]() { return tau_ext_dot_hat_third_order; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_p_hat", [this]() { return p_hat_third_order; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_p_error", [this]() { return p_error_third_order; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_tau_ext_hat_ft_sensor", [this]() { return tau_ext_hat_ft_sensor; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_hat_ft_sensor", [this]() { return tau_ext_hat_ft_sensor_third_order; });
 }
 
 } // namespace mc_plugin
