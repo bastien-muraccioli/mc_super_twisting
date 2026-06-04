@@ -14,8 +14,6 @@
 #include <RBDyn/MultiBody.h>
 #include <RBDyn/MultiBodyConfig.h>
 
-#include <mc_rbdyn/ExternalTorqueSensor.h>
-
 namespace mc_plugin
 {
 
@@ -90,7 +88,6 @@ private:
   double alpha1 = 100; //100 (adaptive)
 
   Eigen::Vector6d externalForcesFT;
-  mc_rbdyn::ExternalTorqueSensor * extTorqueSensor;
 
   // Third order
   bool third_order = false;

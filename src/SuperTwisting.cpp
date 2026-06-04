@@ -52,14 +52,6 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
     }
     lpf_threshold.setValues(threshold_offset, threshold_filtering, jointNumber);
 
-    if(!robot.hasDevice<mc_rbdyn::ExternalTorqueSensor>(torqueSensorName))
-    {
-        mc_rtc::log::error_and_throw<std::runtime_error>(
-            "[SuperTwisting] No \"ExternalTorqueSensor\" with the name \"externalTorqueSensor\" found in "
-            "the robot module, please add one to the robot's RobotModule.");
-    }
-    extTorqueSensor = &robot.device<mc_rbdyn::ExternalTorqueSensor>("externalTorqueSensor");
-
     ctl.setWrenches({{FTSensorName, sva::ForceVecd::Zero()}});
 
     tau_m.setZero(jointNumber);
@@ -188,7 +180,7 @@ void SuperTwisting::before(mc_control::MCGlobalController & controller)
     
     if(plugin_active)
     {
-        extTorqueSensor->torques(tau_ext);
+        robot.setExternalTorques(tau_ext);
     }
     else if(!onePluginIsActive)
     {
@@ -197,7 +189,7 @@ void SuperTwisting::before(mc_control::MCGlobalController & controller)
         // and another plugin is using the external torque sensor
         // mc_rtc::log::info("[SuperTwisting] No other plugin is active, setting external torque to zero");
         Eigen::VectorXd zero = Eigen::VectorXd::Zero(jointNumber);
-        extTorqueSensor->torques(zero);
+        robot.setExternalTorques(zero);
     }
 
     threshold_high = lpf_threshold.adaptiveThreshold(tau_ext, true);
