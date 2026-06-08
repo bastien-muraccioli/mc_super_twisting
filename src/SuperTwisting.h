@@ -52,19 +52,33 @@ private:
   bool activate_plot_ = false;
   bool plot_added_ = false;
   bool collision_stop_activated_ = false;
-  bool obstacle_detected_ = false;
   bool activate_verbose = false;
 
-  LpfThreshold lpf_threshold;
-  Eigen::VectorXd threshold_offset;
-  double threshold_filtering;
-  Eigen::VectorXd threshold_high;
-  Eigen::VectorXd threshold_low;
+  bool obstacle_detected_secondOrder_ = false;
+  LpfThreshold lpf_threshold_secondOrder_;
+  Eigen::VectorXd threshold_offset_secondOrder_;
+  double threshold_filtering_secondOrder_;
+  Eigen::VectorXd threshold_high_secondOrder_;
+  Eigen::VectorXd threshold_low_secondOrder_;
+  
+  bool obstacle_detected_thirdOrder_ = false;
+  LpfThreshold lpf_threshold_thirdOrder_;
+  Eigen::VectorXd threshold_offset_thirdOrder_;
+  double threshold_filtering_thirdOrder_;
+  Eigen::VectorXd threshold_high_thirdOrder_;
+  Eigen::VectorXd threshold_low_thirdOrder_;
+
+  bool obstacle_detected_thirdOrder_tau_ext_dot_ = false;
+  LpfThreshold lpf_threshold_thirdOrder_tau_ext_dot_;
+  Eigen::VectorXd threshold_offset_thirdOrder_tau_ext_dot_;
+  double threshold_filtering_thirdOrder_tau_ext_dot_;
+  Eigen::VectorXd threshold_high_thirdOrder_tau_ext_dot_;
+  Eigen::VectorXd threshold_low_thirdOrder_tau_ext_dot_;
 
   std::string referenceFrame;
   std::string torqueSensorName;
   std::string FTSensorName;
-  bool useFTSensor = true;
+  bool useFTSensor = false;
   bool plugin_active = false;
 
   rbd::Jacobian jac;

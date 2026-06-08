@@ -43,14 +43,32 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
     alpha2 = plugin_config("alpha2", 100.0);
     alpha1 = plugin_config("alpha1", 100.0);
 
-    threshold_filtering = plugin_config("threshold_filtering", 0.05);
-    threshold_offset = plugin_config("threshold_offset");
-    if(threshold_offset.size() != jointNumber)
+    // Thresholds for second order sliding mode
+    threshold_filtering_secondOrder_ = plugin_config("threshold_filtering_secondOrder", 0.05);
+    threshold_offset_secondOrder_ = plugin_config("threshold_offset_secondOrder");
+    if(threshold_offset_secondOrder_.size() != jointNumber)
     {
-        threshold_offset = Eigen::VectorXd::Constant(jointNumber, 10.0);
+        threshold_offset_secondOrder_ = Eigen::VectorXd::Constant(jointNumber, 10.0);
         mc_rtc::log::warning("[SuperTwisting] Threshold offset not set, using default value of 10.0");
     }
-    lpf_threshold.setValues(threshold_offset, threshold_filtering, jointNumber);
+    lpf_threshold_secondOrder_.setValues(threshold_offset_secondOrder_, threshold_filtering_secondOrder_, jointNumber);
+
+    // Thresholds for third order sliding mode
+    threshold_filtering_thirdOrder_ = plugin_config("threshold_filtering_thirdOrder", 0.05);
+    threshold_offset_thirdOrder_ = plugin_config("threshold_offset_thirdOrder");
+    if(threshold_offset_thirdOrder_.size() != jointNumber)    {
+        threshold_offset_thirdOrder_ = Eigen::VectorXd::Constant(jointNumber, 10.0);
+        mc_rtc::log::warning("[SuperTwisting] Threshold offset not set, using default value of 10.0");
+    }
+    lpf_threshold_thirdOrder_.setValues(threshold_offset_thirdOrder_, threshold_filtering_thirdOrder_, jointNumber);
+
+    threshold_filtering_thirdOrder_tau_ext_dot_ = plugin_config("threshold_filtering_thirdOrder_tau_ext_dot", 0.05);
+    threshold_offset_thirdOrder_tau_ext_dot_ = plugin_config("threshold_offset_thirdOrder_tau_ext_dot");
+    if(threshold_offset_thirdOrder_tau_ext_dot_.size() != jointNumber)    {
+        threshold_offset_thirdOrder_tau_ext_dot_ = Eigen::VectorXd::Constant(jointNumber, 10.0);
+        mc_rtc::log::warning("[SuperTwisting] Threshold offset for tau_ext_dot not set, using default value of 10.0");
+    }
+    lpf_threshold_thirdOrder_tau_ext_dot_.setValues(threshold_offset_thirdOrder_tau_ext_dot_, threshold_filtering_thirdOrder_tau_ext_dot_, jointNumber);
 
     ctl.setWrenches({{FTSensorName, sva::ForceVecd::Zero()}});
 
@@ -74,7 +92,7 @@ void SuperTwisting::init(mc_control::MCGlobalController & controller, const mc_r
     forwardDynamics = rbd::ForwardDynamics(robot.mb());
 
     forwardDynamics.computeH(robot.mb(), robot.mbc());
-    inertiaMatrix = forwardDynamics.H() - forwardDynamics.HIr();
+    inertiaMatrix = forwardDynamics.H();
     p = inertiaMatrix * qdot;
     p_hat = Eigen::VectorXd::Zero(jointNumber);
     p_error = p - p_hat;
@@ -192,20 +210,45 @@ void SuperTwisting::before(mc_control::MCGlobalController & controller)
         robot.setExternalTorques(zero);
     }
 
-    threshold_high = lpf_threshold.adaptiveThreshold(tau_ext, true);
-    threshold_low = lpf_threshold.adaptiveThreshold(tau_ext, false);
-    obstacle_detected_ = false;
+    threshold_high_secondOrder_ = lpf_threshold_secondOrder_.adaptiveThreshold(tau_ext_hat, true);
+    threshold_low_secondOrder_ = lpf_threshold_secondOrder_.adaptiveThreshold(tau_ext_hat, false);
+    obstacle_detected_secondOrder_ = false;
     for (int i = 0; i < jointNumber; i++)
     {
-        if (tau_ext[i] > threshold_high[i] || tau_ext[i] < threshold_low[i])
+        if (tau_ext_hat[i] > threshold_high_secondOrder_[i] || tau_ext_hat[i] < threshold_low_secondOrder_[i])
         {
-            obstacle_detected_ = true;
-            if(activate_verbose) mc_rtc::log::info("[SuperTwisting] Obstacle detected on joint {}", i);
-            if (collision_stop_activated_) ctl.controller().datastore().get<bool>("Obstacle detected") = obstacle_detected_;
+            obstacle_detected_secondOrder_ = true;
+            if(activate_verbose) mc_rtc::log::info("[SuperTwisting] Obstacle detected on joint with second order {}", i);
+            if (collision_stop_activated_) ctl.controller().datastore().get<bool>("Obstacle detected") = obstacle_detected_secondOrder_;
             break;
         }
     }
-    // mc_rtc::log::info("SuperTwisting::before");
+
+    threshold_high_thirdOrder_ = lpf_threshold_thirdOrder_.adaptiveThreshold(tau_ext_hat_third_order, true);
+    threshold_low_thirdOrder_ = lpf_threshold_thirdOrder_.adaptiveThreshold(tau_ext_hat_third_order, false);
+    obstacle_detected_thirdOrder_ = false;
+    for (int i = 0; i < jointNumber; i++)    
+    {
+        if (tau_ext_hat_third_order[i] > threshold_high_thirdOrder_[i] || tau_ext_hat_third_order[i] < threshold_low_thirdOrder_[i])        {
+            obstacle_detected_thirdOrder_ = true;
+            if(activate_verbose) mc_rtc::log::info("[SuperTwisting] Obstacle detected on joint {} with third order", i);
+            if (collision_stop_activated_) ctl.controller().datastore().get<bool>("Obstacle detected") = obstacle_detected_thirdOrder_;
+            break;
+        }
+    }
+
+    threshold_high_thirdOrder_tau_ext_dot_ = lpf_threshold_thirdOrder_tau_ext_dot_.adaptiveThreshold(tau_ext_hat_dot_third_order, true);
+    threshold_low_thirdOrder_tau_ext_dot_ = lpf_threshold_thirdOrder_tau_ext_dot_.adaptiveThreshold(tau_ext_hat_dot_third_order, false);
+    obstacle_detected_thirdOrder_tau_ext_dot_ = false;
+    for (int i = 0; i < jointNumber; i++)    
+    {
+        if (tau_ext_hat_dot_third_order[i] > threshold_high_thirdOrder_tau_ext_dot_[i] || tau_ext_hat_dot_third_order[i] < threshold_low_thirdOrder_tau_ext_dot_[i])        {
+            obstacle_detected_thirdOrder_tau_ext_dot_ = true;
+            if(activate_verbose) mc_rtc::log::info("[SuperTwisting] Obstacle detected on joint {} with third order tau_ext_dot", i);
+            if (collision_stop_activated_) ctl.controller().datastore().get<bool>("Obstacle detected") = obstacle_detected_thirdOrder_tau_ext_dot_;
+            break;
+        }
+    }
 }
 
 void SuperTwisting::after(mc_control::MCGlobalController & controller)
@@ -261,7 +304,7 @@ void SuperTwisting::computeMomemtum(mc_control::MCGlobalController & controller)
         gamma = tau_m + (coriolisMatrix + coriolisMatrix.transpose()) * qdot - coriolisGravityTerm; //gamma = tau_m -g + C^T*qdot
         tau_ext_ft_sensor.setZero(jointNumber);
     }
-    inertiaMatrix = forwardDynamics.H() - forwardDynamics.HIr();
+    inertiaMatrix = forwardDynamics.H();
     // x_hat_dot = Gamma + γ1*sqrt(|x - x_hat|)*Sign(x - x_hat) + d_hat
     Eigen::VectorXd p_hat_dot = gamma + gamma1*(p_error).cwiseAbs().cwiseSqrt().cwiseProduct(Sign(p_error)) + alpha1*(p_error) + tau_ext_hat;
     p_hat += p_hat_dot*dt_;
@@ -349,16 +392,31 @@ void SuperTwisting::addPlot(mc_control::MCGlobalController & ctl)
         mc_rtc::gui::plot::Y("tau_ext_hat_third_order(t)", [this]() { return tau_ext_hat_third_order[jointShown]; }, mc_rtc::gui::Color::Blue)
        
     );
+
     gui.addPlot(
-        "Torque estimation with FT Sensor",
+        "Torque estimation second order",
         mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
-        mc_rtc::gui::plot::Y("high_threshold(t)", [this]() { return threshold_high[jointShown]; }, mc_rtc::gui::Color::Gray),
-        mc_rtc::gui::plot::Y("low_threshold(t)", [this]() { return threshold_low[jointShown]; }, mc_rtc::gui::Color::Gray),
-        mc_rtc::gui::plot::Y("tau_ext_ft_sensor(t)", [this]() { return tau_ext_ft_sensor[jointShown]; }, mc_rtc::gui::Color::Black),
-        mc_rtc::gui::plot::Y("tau_ext_hat", [this]() { return tau_ext_hat_ft_sensor[jointShown]; }, mc_rtc::gui::Color::Green),
-        mc_rtc::gui::plot::Y("tau_ext_hat_third_order(t)", [this]() { return tau_ext_hat_ft_sensor_third_order[jointShown]; }, mc_rtc::gui::Color::Blue),
-        mc_rtc::gui::plot::Y("tau_ext_used(t)", [this]() { return tau_ext[jointShown]; }, mc_rtc::gui::Color::Red)
+        mc_rtc::gui::plot::Y("high_threshold(t)", [this]() { return threshold_high_secondOrder_[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("low_threshold(t)", [this]() { return threshold_low_secondOrder_[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("tau_ext_hat", [this]() { return tau_ext_hat_ft_sensor[jointShown]; }, mc_rtc::gui::Color::Green)
     );
+
+    gui.addPlot(
+        "Torque estimation third order",
+        mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
+        mc_rtc::gui::plot::Y("tau_ext_hat_third_order", [this]() { return tau_ext_hat_ft_sensor_third_order[jointShown]; }, mc_rtc::gui::Color::Blue),
+        mc_rtc::gui::plot::Y("high_threshold(t)", [this]() { return threshold_high_thirdOrder_[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("low_threshold(t)", [this]() { return threshold_low_thirdOrder_[jointShown]; }, mc_rtc::gui::Color::Gray)
+    );
+
+    gui.addPlot(
+        "Torque dot estimation third order",
+        mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
+        mc_rtc::gui::plot::Y("tau_ext_hat_dot_third_order", [this]() { return tau_ext_hat_dot_third_order[jointShown]; }, mc_rtc::gui::Color::Blue),
+        mc_rtc::gui::plot::Y("high_threshold(t)", [this]() { return threshold_high_thirdOrder_tau_ext_dot_[jointShown]; }, mc_rtc::gui::Color::Gray),
+        mc_rtc::gui::plot::Y("low_threshold(t)", [this]() { return threshold_low_thirdOrder_tau_ext_dot_[jointShown]; }, mc_rtc::gui::Color::Gray)
+    );
+
     gui.addPlot(
         "Gamma",
         mc_rtc::gui::plot::X("t", [this]() { return counter_; }),
@@ -374,6 +432,7 @@ void SuperTwisting::addPlot(mc_control::MCGlobalController & ctl)
 void SuperTwisting::addGui(mc_control::MCGlobalController & ctl)
 {
     auto & gui = *ctl.controller().gui();
+    std::vector<std::string> jointNames = ctl.robot().refJointOrder();
     gui.addElement({"Plugins", "SuperTwisting"},
         mc_rtc::gui::Checkbox(
             "Is estimation feedback active", plugin_active),
@@ -392,20 +451,42 @@ void SuperTwisting::addGui(mc_control::MCGlobalController & ctl)
         mc_rtc::gui::Checkbox("Collision stop", collision_stop_activated_),
         mc_rtc::gui::Checkbox("Verbose", activate_verbose), 
         // Add Threshold offset input
-        mc_rtc::gui::ArrayInput("Threshold offset", {"q_0", "q_1", "q_2", "q_3", "q_4", "q_5", "q_6"}, 
-            [this](){return this->threshold_offset;},
+        mc_rtc::gui::ArrayInput("Threshold offset second order", {jointNames}, 
+            [this](){return this->threshold_offset_secondOrder_;},
             [this](const Eigen::VectorXd & offset)
             { 
-            threshold_offset = offset;
-            lpf_threshold.setOffset(threshold_offset); 
+            threshold_offset_secondOrder_ = offset;
+            lpf_threshold_secondOrder_.setOffset(threshold_offset_secondOrder_); 
             }),
         // Add Threshold filtering input
-        mc_rtc::gui::NumberInput("Threshold filtering", [this](){return this->threshold_filtering;},
+        mc_rtc::gui::NumberInput("Threshold filtering second order", [this](){return this->threshold_filtering_secondOrder_;},
             [this](double filtering)
             { 
-            threshold_filtering = filtering;
-            lpf_threshold.setFiltering(threshold_filtering); 
-            })                                               
+            threshold_filtering_secondOrder_ = filtering;
+            lpf_threshold_secondOrder_.setFiltering(threshold_filtering_secondOrder_); 
+            }),
+        mc_rtc::gui::ArrayInput("Threshold offset third order", {jointNames},
+            [this](){return this->threshold_offset_thirdOrder_;},
+            [this](const Eigen::VectorXd & offset)            { 
+            threshold_offset_thirdOrder_ = offset;
+            lpf_threshold_thirdOrder_.setOffset(threshold_offset_thirdOrder_); 
+            }),
+        mc_rtc::gui::NumberInput("Threshold filtering third order", [this](){return this->threshold_filtering_thirdOrder_;},
+            [this](double filtering)            { 
+            threshold_filtering_thirdOrder_ = filtering;
+            lpf_threshold_thirdOrder_.setFiltering(threshold_filtering_thirdOrder_); 
+            }),
+        mc_rtc::gui::ArrayInput("Threshold offset third order tau_ext_dot", {jointNames},
+            [this](){return this->threshold_offset_thirdOrder_tau_ext_dot_;},
+            [this](const Eigen::VectorXd & offset)            { 
+            threshold_offset_thirdOrder_tau_ext_dot_ = offset;
+            lpf_threshold_thirdOrder_tau_ext_dot_.setOffset(threshold_offset_thirdOrder_tau_ext_dot_); 
+            }),
+        mc_rtc::gui::NumberInput("Threshold filtering third order tau_ext_dot", [this](){return this->threshold_filtering_thirdOrder_tau_ext_dot_;},
+            [this](double filtering)            { 
+            threshold_filtering_thirdOrder_tau_ext_dot_ = filtering;
+            lpf_threshold_thirdOrder_tau_ext_dot_.setFiltering(threshold_filtering_thirdOrder_tau_ext_dot_); 
+            })
         );
     gui.addElement({"Plugins", "SuperTwisting"},
         mc_rtc::gui::Checkbox("Use FT Sensor", useFTSensor));
@@ -501,9 +582,25 @@ void SuperTwisting::addLog(mc_control::MCGlobalController & ctl)
     ctl.controller().logger().addLogEntry("SuperTwisting_tau_ext_hat_dot", [this]() { return tau_ext_hat_dot; });
     ctl.controller().logger().addLogEntry("SuperTwisting_gamma", [this]() { return gamma; });
     ctl.controller().logger().addLogEntry("SuperTwisting_tau_ext", [this]() { return tau_ext; });
-    ctl.controller().logger().addLogEntry("SuperTwisting_threshold_high", [this]() { return threshold_high; });
-    ctl.controller().logger().addLogEntry("SuperTwisting_threshold_low", [this]() { return threshold_low; });
-    ctl.controller().logger().addLogEntry("SuperTwisting_obstacle_detected", [this]() { return obstacle_detected_; });
+
+    ctl.controller().logger().addLogEntry("SuperTwisting_second_order_obstacle_detected", [this]() { return obstacle_detected_secondOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_second_order_threshold_high", [this]() { return threshold_high_secondOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_second_order_threshold_low", [this]() { return threshold_low_secondOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_second_order_threshold_offset", [this]() { return threshold_offset_secondOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_second_order_threshold_filtering", [this]() { return threshold_filtering_secondOrder_; });
+
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_obstacle_detected", [this]() { return obstacle_detected_thirdOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_threshold_high", [this]() { return threshold_high_thirdOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_threshold_low", [this]() { return threshold_low_thirdOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_threshold_offset", [this]() { return threshold_offset_thirdOrder_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_threshold_filtering", [this]() { return threshold_filtering_thirdOrder_; });
+
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_dot_obstacle_detected", [this]() { return obstacle_detected_thirdOrder_tau_ext_dot_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_dot_threshold_high", [this]() { return threshold_high_thirdOrder_tau_ext_dot_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_dot_threshold_low", [this]() { return threshold_low_thirdOrder_tau_ext_dot_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_dot_threshold_offset", [this]() { return threshold_offset_thirdOrder_tau_ext_dot_; });
+    ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_dot_threshold_filtering", [this]() { return threshold_filtering_thirdOrder_tau_ext_dot_; });
+
     ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_hat", [this]() { return tau_ext_hat_third_order; });
     ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_hat_dot", [this]() { return tau_ext_hat_dot_third_order; });
     ctl.controller().logger().addLogEntry("SuperTwisting_third_order_tau_ext_dot_hat", [this]() { return tau_ext_dot_hat_third_order; });

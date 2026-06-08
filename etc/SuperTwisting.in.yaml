@@ -14,5 +14,10 @@ super_twisting:
   gamma2_third_order: 0 #209
   gamma1_third_order: 0 #14
 
-  threshold_offset: [12.0, 17.0, 4.0, 14.0, 5.0, 6.0, 2.0]
-  threshold_filtering: 0.005
+  threshold_offset_secondOrder: [12.0, 17.0, 4.0, 14.0, 5.0, 6.0, 2.0]
+  threshold_filtering_secondOrder: 0.005
+
+  threshold_offset_thirdOrder: [12.0, 17.0, 4.0, 14.0, 5.0, 6.0, 2.0]
+  threshold_filtering_thirdOrder: 0.005
+  threshold_offset_thirdOrder_tau_ext_dot: [12.0, 17.0, 4.0, 14.0, 5.0, 6.0, 2.0]
+  threshold_filtering_thirdOrder_tau_ext_dot: 0.005
