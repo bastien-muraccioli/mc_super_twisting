@@ -42,7 +42,6 @@ struct SuperTwisting : public mc_control::GlobalPlugin
   ~SuperTwisting() override;
 
 private:
-
   // GUI
   double dt_;
   double counter_;
@@ -60,7 +59,7 @@ private:
   double threshold_filtering_secondOrder_;
   Eigen::VectorXd threshold_high_secondOrder_;
   Eigen::VectorXd threshold_low_secondOrder_;
-  
+
   bool obstacle_detected_thirdOrder_ = false;
   LpfThreshold lpf_threshold_thirdOrder_;
   Eigen::VectorXd threshold_offset_thirdOrder_;
@@ -87,35 +86,35 @@ private:
   Eigen::VectorXd gamma;
   Eigen::MatrixXd inertiaMatrix;
   Eigen::MatrixXd jTranspose;
-  Eigen::VectorXd p; //momentum
-  Eigen::VectorXd p_hat; //Estimated momentum
-  Eigen::VectorXd p_error; //Momentum error
+  Eigen::VectorXd p; // momentum
+  Eigen::VectorXd p_hat; // Estimated momentum
+  Eigen::VectorXd p_error; // Momentum error
   Eigen::VectorXd tau_m;
   Eigen::VectorXd tau_ext_ft_sensor; // GroundTruth
-  Eigen::VectorXd tau_ext_hat; //Estimated external torque without the FT_sensor
-  Eigen::VectorXd tau_ext_hat_ft_sensor; //Estimated external torque with the FT_sensor
-  Eigen::VectorXd tau_ext_hat_dot; //Estimated external torque derivative without the FT_sensor
-  Eigen::VectorXd tau_ext; //Estimated external torque of all the system
+  Eigen::VectorXd tau_ext_hat; // Estimated external torque without the FT_sensor
+  Eigen::VectorXd tau_ext_hat_ft_sensor; // Estimated external torque with the FT_sensor
+  Eigen::VectorXd tau_ext_hat_dot; // Estimated external torque derivative without the FT_sensor
+  Eigen::VectorXd tau_ext; // Estimated external torque of all the system
   double gamma2 = 100.0;
   double gamma1 = 21;
-  double alpha2 = 100; //100 (adaptive)
-  double alpha1 = 100; //100 (adaptive)
+  double alpha2 = 100; // 100 (adaptive)
+  double alpha1 = 100; // 100 (adaptive)
+  double c;
 
   Eigen::Vector6d externalForcesFT;
 
   // Third order
   bool third_order = false;
-  double c = 100.0; // Maximum value of the third order term (derivative of the external torque)
+  double c_third_order = 100.0; // Maximum value of the third order term (derivative of the external torque)
   double gamma3_third_order; // 1.1*c
   double gamma2_third_order; // (9/2)*c^(5/6)
-  double gamma1_third_order; //3*c^(1/3)
-  Eigen::VectorXd p_hat_third_order; //Estimated momentum
-  Eigen::VectorXd p_error_third_order; //Momentum error
-  Eigen::VectorXd tau_ext_hat_third_order;  //Estimated external torque without the FT_sensor
-  Eigen::VectorXd tau_ext_hat_ft_sensor_third_order; //Estimated external torque with the FT_sensor
+  double gamma1_third_order; // 3*c^(1/3)
+  Eigen::VectorXd p_hat_third_order; // Estimated momentum
+  Eigen::VectorXd p_error_third_order; // Momentum error
+  Eigen::VectorXd tau_ext_hat_third_order; // Estimated external torque without the FT_sensor
+  Eigen::VectorXd tau_ext_hat_ft_sensor_third_order; // Estimated external torque with the FT_sensor
   Eigen::VectorXd tau_ext_hat_dot_third_order; // The derivative of the estimated external torque
-  Eigen::VectorXd tau_ext_dot_hat_third_order;  // The estimated external torque derivative
-
+  Eigen::VectorXd tau_ext_dot_hat_third_order; // The estimated external torque derivative
 };
 
 } // namespace mc_plugin

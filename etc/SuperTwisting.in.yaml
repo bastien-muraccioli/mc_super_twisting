@@ -9,7 +9,7 @@ super_twisting:
   alpha2: 100
   alpha1: 100
 
-  c: 100
+  c_third_order: 100
   gamma3_third_order: 0 #110
   gamma2_third_order: 0 #209
   gamma1_third_order: 0 #14
